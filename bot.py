@@ -7,6 +7,7 @@ import threading
 import os
 import json
 import sqlite3
+import random
 from email.header import decode_header
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -65,6 +66,64 @@ def send_menu(chat_id):
         "text": "✅ You are logged in",
         "reply_markup": json.dumps(keyboard)
     })
+
+def send_variation_options(chat_id):
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "Dot Trick", "callback_data": "dot"}],
+            [{"text": "Random Caps", "callback_data": "caps"}],
+            [{"text": "Mixed", "callback_data": "mix"}]
+        ]
+    }
+
+    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data={
+        "chat_id": chat_id,
+        "text": "Choose variation type:",
+        "reply_markup": json.dumps(keyboard)
+    })
+
+# ================= VARIATIONS =================
+def dot_variation(email_addr):
+    name, domain = email_addr.split("@")
+    variations = set()
+
+    while len(variations) < 10:
+        i = random.randint(1, len(name)-1)
+        variations.add(name[:i] + "." + name[i:] + "@" + domain)
+
+    return list(variations)
+
+def caps_variation(email_addr):
+    name, domain = email_addr.split("@")
+    variations = set()
+
+    while len(variations) < 10:
+        new = "".join(
+            c.upper() if random.random() > 0.5 else c
+            for c in name
+        )
+        variations.add(new + "@" + domain)
+
+    return list(variations)
+
+def mixed_variation(email_addr):
+    name, domain = email_addr.split("@")
+    variations = set()
+
+    while len(variations) < 10:
+        new = ""
+        for c in name:
+            if random.random() > 0.5:
+                c = c.upper()
+            new += c
+
+            if random.random() > 0.7:
+                new += "."
+
+        new = new.strip(".")
+        variations.add(new + "@" + domain)
+
+    return list(variations)
 
 # ================= OTP =================
 def extract_otp(text):
@@ -210,11 +269,44 @@ def handle_updates():
             if data == "logout":
                 logout_user(chat_id)
 
+            elif data == "gen":
+                send_variation_options(chat_id)
+
+            elif data in ["dot", "caps", "mix"]:
+                cursor.execute("SELECT email FROM users WHERE chat_id=?", (chat_id,))
+                row = cursor.fetchone()
+
+                if not row:
+                    send(chat_id, "⚠️ Login first")
+                    return
+
+                email_addr = row[0]
+
+                if data == "dot":
+                    variations = dot_variation(email_addr)
+                    title = "🔹 Dot Variations"
+
+                elif data == "caps":
+                    variations = caps_variation(email_addr)
+                    title = "🔹 Caps Variations"
+
+                else:
+                    variations = mixed_variation(email_addr)
+                    title = "🔹 Mixed Variations"
+
+                send(chat_id,
+                    title + "\n\n" +
+                    "\n".join(f"`{v}`" for v in variations)
+                )
+
 # ================= LOOPS =================
 def telegram_loop():
     while True:
-        handle_updates()
-        time.sleep(1)
+        try:
+            handle_updates()
+            time.sleep(1)
+        except:
+            time.sleep(2)
 
 def gmail_loop():
     while True:
@@ -226,7 +318,7 @@ def gmail_loop():
         time.sleep(5)
 
 # ================= MAIN =================
-print("🚀 DB BOT RUNNING...")
+print("🚀 FINAL BOT RUNNING...")
 
 threading.Thread(target=telegram_loop).start()
 threading.Thread(target=gmail_loop).start()
