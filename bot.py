@@ -1,8 +1,6 @@
 import imaplib
 import email
 import requests
-import json
-import random
 import time
 import re
 import threading
@@ -12,8 +10,8 @@ from email.header import decode_header
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 IMAP_SERVER = "imap.gmail.com"
 
-# ================= USERS =================
 users = {}
+user_states = {}
 
 # ================= TELEGRAM =================
 def send(chat_id, text):
@@ -42,7 +40,7 @@ def get_body(msg):
                     return ""
     return ""
 
-# ================= LOGIN =================
+# ================= LOGIN FLOW =================
 def login_user(chat_id, email_addr, app_pass):
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER)
@@ -51,7 +49,6 @@ def login_user(chat_id, email_addr, app_pass):
 
         _, data = mail.uid("search", None, "ALL")
         uids = data[0].split()
-
         last_uid = uids[-1] if uids else None
 
         users[chat_id] = {
@@ -64,8 +61,8 @@ def login_user(chat_id, email_addr, app_pass):
 
         send(chat_id, "✅ *Logged in successfully!*")
 
-    except Exception as e:
-        send(chat_id, "❌ Login failed. Check email/app password.")
+    except:
+        send(chat_id, "❌ Login failed. Try again with `/start`")
 
 # ================= LOGOUT =================
 def logout_user(chat_id):
@@ -136,28 +133,42 @@ def handle_updates():
             chat_id = update["message"]["chat"]["id"]
             text = update["message"].get("text", "")
 
-            if text.startswith("/start"):
-                send(chat_id,
-                    "🤖 *Multi-User OTP Bot*\n\n"
-                    "Login:\n`/login email app_password`\n\n"
-                    "Logout:\n`/logout`"
-                )
+            # ===== START =====
+            if text == "/start":
+                user_states[chat_id] = "awaiting_email"
+                send(chat_id, "📧 Enter your Gmail:")
 
-            elif text.startswith("/login"):
-                try:
-                    _, email_addr, app_pass = text.split()
+            # ===== EMAIL STEP =====
+            elif user_states.get(chat_id) == "awaiting_email":
+                user_states[chat_id] = {
+                    "step": "awaiting_password",
+                    "email": text
+                }
+                send(chat_id, "🔑 Enter your App Password:")
+
+            # ===== PASSWORD STEP =====
+            elif isinstance(user_states.get(chat_id), dict):
+                data = user_states[chat_id]
+
+                if data["step"] == "awaiting_password":
+                    email_addr = data["email"]
+                    app_pass = text
+
+                    user_states.pop(chat_id, None)
                     login_user(chat_id, email_addr, app_pass)
-                except:
-                    send(chat_id, "Usage:\n`/login email app_password`")
 
+            # ===== LOGOUT =====
             elif text == "/logout":
                 logout_user(chat_id)
 
 # ================= LOOPS =================
 def telegram_loop():
     while True:
-        handle_updates()
-        time.sleep(1)
+        try:
+            handle_updates()
+            time.sleep(1)
+        except:
+            time.sleep(2)
 
 def gmail_loop():
     while True:
@@ -166,7 +177,7 @@ def gmail_loop():
         time.sleep(5)
 
 # ================= MAIN =================
-print("🚀 Multi-user bot running...")
+print("🚀 Step-login bot running...")
 
 threading.Thread(target=telegram_loop).start()
 threading.Thread(target=gmail_loop).start()
