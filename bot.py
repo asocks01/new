@@ -9,52 +9,30 @@ import threading
 import os
 from email.header import decode_header
 
-# ================= CONFIG (ENV) =================
-EMAIL = os.getenv("EMAIL")
-APP_PASSWORD = os.getenv("APP_PASSWORD")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 IMAP_SERVER = "imap.gmail.com"
 
+# ================= USERS =================
+users = {}
+
 # ================= TELEGRAM =================
-def send_telegram(message, chat_id):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, data={
+def send(chat_id, text):
+    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data={
         "chat_id": chat_id,
-        "text": message,
+        "text": text,
         "parse_mode": "Markdown"
     })
 
-def send_main_button(chat_id):
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": "⚙️ Generate Gmail Variations", "callback_data": "gen"}]
-        ]
-    }
-
-    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data={
-        "chat_id": chat_id,
-        "text": "Choose an option 👇",
-        "reply_markup": json.dumps(keyboard)
-    })
-
-def send_variation_options(chat_id):
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": "Dot Trick", "callback_data": "dot"}],
-            [{"text": "Random Caps", "callback_data": "caps"}],
-            [{"text": "Mixed", "callback_data": "mix"}]
-        ]
-    }
-
-    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data={
-        "chat_id": chat_id,
-        "text": "Select variation type:",
-        "reply_markup": json.dumps(keyboard)
-    })
+# ================= OTP =================
+def extract_otp(text):
+    text = text.lower()
+    if not any(k in text for k in ["otp", "code", "verification", "password"]):
+        return None
+    match = re.findall(r"\b\d{4,8}\b", text)
+    return match[0] if match else None
 
 # ================= EMAIL =================
-def get_email_body(msg):
+def get_body(msg):
     if msg.is_multipart():
         for part in msg.walk():
             if part.get_content_type() in ["text/plain", "text/html"]:
@@ -62,71 +40,86 @@ def get_email_body(msg):
                     return part.get_payload(decode=True).decode()
                 except:
                     return ""
+    return ""
+
+# ================= LOGIN =================
+def login_user(chat_id, email_addr, app_pass):
+    try:
+        mail = imaplib.IMAP4_SSL(IMAP_SERVER)
+        mail.login(email_addr, app_pass)
+        mail.select("inbox")
+
+        _, data = mail.uid("search", None, "ALL")
+        uids = data[0].split()
+
+        last_uid = uids[-1] if uids else None
+
+        users[chat_id] = {
+            "email": email_addr,
+            "pass": app_pass,
+            "last_uid": last_uid
+        }
+
+        mail.logout()
+
+        send(chat_id, "✅ *Logged in successfully!*")
+
+    except Exception as e:
+        send(chat_id, "❌ Login failed. Check email/app password.")
+
+# ================= LOGOUT =================
+def logout_user(chat_id):
+    if chat_id in users:
+        del users[chat_id]
+        send(chat_id, "🚪 Logged out.")
     else:
-        try:
-            return msg.get_payload(decode=True).decode()
-        except:
-            return ""
+        send(chat_id, "You are not logged in.")
 
-# ================= OTP =================
-def extract_otp(text):
-    text = text.lower()
+# ================= CHECK EMAIL =================
+def check_user_email(chat_id, user):
+    try:
+        mail = imaplib.IMAP4_SSL(IMAP_SERVER)
+        mail.login(user["email"], user["pass"])
+        mail.select("inbox")
 
-    if not any(k in text for k in ["otp", "code", "verification", "password"]):
-        return None
+        _, data = mail.uid("search", None, "ALL")
+        uids = data[0].split()
 
-    match = re.findall(r"\b\d{4,8}\b", text)
-    return match[0] if match else None
+        new_uids = [
+            uid for uid in uids
+            if user["last_uid"] is None or int(uid) > int(user["last_uid"])
+        ]
 
-# ================= VARIATIONS =================
-def dot_variation(email_addr):
-    name, domain = email_addr.split("@")
-    variations = set()
+        if new_uids:
+            user["last_uid"] = new_uids[-1]
 
-    while len(variations) < 10:
-        i = random.randint(1, len(name)-1)
-        variations.add(name[:i] + "." + name[i:] + "@" + domain)
+        for uid in new_uids:
+            _, msg_data = mail.uid("fetch", uid, "(RFC822)")
 
-    return list(variations)
+            for part in msg_data:
+                if isinstance(part, tuple):
+                    msg = email.message_from_bytes(part[1])
 
-def caps_variation(email_addr):
-    name, domain = email_addr.split("@")
-    variations = set()
+                    subject, enc = decode_header(msg["Subject"])[0]
+                    if isinstance(subject, bytes):
+                        subject = subject.decode(enc or "utf-8")
 
-    while len(variations) < 10:
-        new = "".join(
-            c.upper() if random.random() > 0.5 else c
-            for c in name
-        )
-        variations.add(new + "@" + domain)
+                    body = get_body(msg)
+                    otp = extract_otp(subject + "\n" + body)
 
-    return list(variations)
+                    if otp:
+                        send(chat_id, f"🔐 OTP: `{otp}`")
 
-def mixed_variation(email_addr):
-    name, domain = email_addr.split("@")
-    variations = set()
+        mail.logout()
 
-    while len(variations) < 10:
-        new = ""
-        for c in name:
-            if random.random() > 0.5:
-                c = c.upper()
-            new += c
+    except:
+        send(chat_id, "⚠️ Error checking email.")
 
-            if random.random() > 0.7:
-                new += "."
-
-        new = new.strip(".")
-        variations.add(new + "@" + domain)
-
-    return list(variations)
-
-# ================= TELEGRAM HANDLER =================
+# ================= TELEGRAM =================
 LAST_UPDATE_ID = None
-AUTHORIZED_CHAT = None
 
 def handle_updates():
-    global LAST_UPDATE_ID, AUTHORIZED_CHAT
+    global LAST_UPDATE_ID
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
     params = {"timeout": 5}
@@ -139,143 +132,41 @@ def handle_updates():
     for update in res.get("result", []):
         LAST_UPDATE_ID = update["update_id"]
 
-        # ===== /start =====
         if "message" in update:
             chat_id = update["message"]["chat"]["id"]
             text = update["message"].get("text", "")
 
-            if text == "/start":
-                AUTHORIZED_CHAT = chat_id
-
-                send_telegram(
-                    "🤖 *Welcome!*\n\n"
-                    "I will send OTP emails instantly 🔐\n\n"
-                    "Use the button below 👇",
-                    chat_id
+            if text.startswith("/start"):
+                send(chat_id,
+                    "🤖 *Multi-User OTP Bot*\n\n"
+                    "Login:\n`/login email app_password`\n\n"
+                    "Logout:\n`/logout`"
                 )
 
-                send_main_button(chat_id)
+            elif text.startswith("/login"):
+                try:
+                    _, email_addr, app_pass = text.split()
+                    login_user(chat_id, email_addr, app_pass)
+                except:
+                    send(chat_id, "Usage:\n`/login email app_password`")
 
-        # ===== BUTTONS =====
-        if "callback_query" in update:
-            data = update["callback_query"]["data"]
-            chat_id = update["callback_query"]["message"]["chat"]["id"]
+            elif text == "/logout":
+                logout_user(chat_id)
 
-            if chat_id != AUTHORIZED_CHAT:
-                return
-
-            if data == "gen":
-                send_variation_options(chat_id)
-
-            elif data == "dot":
-                send_telegram(
-                    "🔹 *Dot Variations:*\n\n" +
-                    "\n".join(f"`{v}`" for v in dot_variation(EMAIL)),
-                    chat_id
-                )
-
-            elif data == "caps":
-                send_telegram(
-                    "🔹 *Caps Variations:*\n\n" +
-                    "\n".join(f"`{v}`" for v in caps_variation(EMAIL)),
-                    chat_id
-                )
-
-            elif data == "mix":
-                send_telegram(
-                    "🔹 *Mixed Variations:*\n\n" +
-                    "\n".join(f"`{v}`" for v in mixed_variation(EMAIL)),
-                    chat_id
-                )
-
-# ================= UID TRACK =================
-last_uid = None
-
-def init_last_uid():
-    global last_uid
-
-    mail = imaplib.IMAP4_SSL(IMAP_SERVER)
-    mail.login(EMAIL, APP_PASSWORD)
-    mail.select("inbox")
-
-    _, data = mail.uid("search", None, "ALL")
-    uids = data[0].split()
-
-    if uids:
-        last_uid = uids[-1]
-
-    mail.logout()
-
-# ================= CHECK EMAIL =================
-def check_email():
-    global last_uid
-
-    if not AUTHORIZED_CHAT:
-        return
-
-    mail = imaplib.IMAP4_SSL(IMAP_SERVER)
-    mail.login(EMAIL, APP_PASSWORD)
-    mail.select("inbox")
-
-    _, data = mail.uid("search", None, "ALL")
-    uids = data[0].split()
-
-    new_uids = [uid for uid in uids if last_uid is None or int(uid) > int(last_uid)]
-
-    if new_uids:
-        last_uid = new_uids[-1]
-
-    for uid in new_uids:
-        _, msg_data = mail.uid("fetch", uid, "(RFC822)")
-
-        for part in msg_data:
-            if isinstance(part, tuple):
-                msg = email.message_from_bytes(part[1])
-
-                subject, enc = decode_header(msg["Subject"])[0]
-                if isinstance(subject, bytes):
-                    subject = subject.decode(enc or "utf-8")
-
-                body = get_email_body(msg)
-                otp = extract_otp(subject + "\n" + body)
-
-                if otp:
-                    send_telegram(
-                        f"🔐 *OTP DETECTED*\n\nCode: `{otp}`",
-                        AUTHORIZED_CHAT
-                    )
-
-    mail.logout()
-
-# ================= THREADS =================
+# ================= LOOPS =================
 def telegram_loop():
     while True:
-        try:
-            handle_updates()
-            time.sleep(1)
-        except Exception as e:
-            print("Telegram Error:", e)
-            time.sleep(2)
+        handle_updates()
+        time.sleep(1)
 
 def gmail_loop():
     while True:
-        try:
-            check_email()
-            time.sleep(5)
-        except Exception as e:
-            print("Gmail Error:", e)
-            time.sleep(5)
+        for chat_id, user in list(users.items()):
+            check_user_email(chat_id, user)
+        time.sleep(5)
 
 # ================= MAIN =================
-print("🚀 DEPLOYED BOT RUNNING...")
+print("🚀 Multi-user bot running...")
 
-init_last_uid()
-
-t1 = threading.Thread(target=telegram_loop)
-t2 = threading.Thread(target=gmail_loop)
-
-t1.start()
-t2.start()
-
-t1.join()
-t2.join()
+threading.Thread(target=telegram_loop).start()
+threading.Thread(target=gmail_loop).start()
