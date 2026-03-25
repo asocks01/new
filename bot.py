@@ -5,12 +5,43 @@ import time
 import re
 import threading
 import os
+import json
+import sqlite3
 from email.header import decode_header
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 IMAP_SERVER = "imap.gmail.com"
 
-users = {}
+# ================= DATABASE =================
+conn = sqlite3.connect("users.db", check_same_thread=False)
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    chat_id INTEGER PRIMARY KEY,
+    email TEXT,
+    app_password TEXT,
+    last_uid TEXT
+)
+""")
+conn.commit()
+
+def save_user(chat_id, email, password, last_uid):
+    cursor.execute(
+        "REPLACE INTO users VALUES (?, ?, ?, ?)",
+        (chat_id, email, password, last_uid)
+    )
+    conn.commit()
+
+def delete_user(chat_id):
+    cursor.execute("DELETE FROM users WHERE chat_id=?", (chat_id,))
+    conn.commit()
+
+def get_all_users():
+    cursor.execute("SELECT * FROM users")
+    return cursor.fetchall()
+
+# ================= STATE =================
 user_states = {}
 
 # ================= TELEGRAM =================
@@ -19,6 +50,20 @@ def send(chat_id, text):
         "chat_id": chat_id,
         "text": text,
         "parse_mode": "Markdown"
+    })
+
+def send_menu(chat_id):
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "⚙️ Gmail Variations", "callback_data": "gen"}],
+            [{"text": "🚪 Logout", "callback_data": "logout"}]
+        ]
+    }
+
+    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data={
+        "chat_id": chat_id,
+        "text": "✅ You are logged in",
+        "reply_markup": json.dumps(keyboard)
     })
 
 # ================= OTP =================
@@ -40,7 +85,7 @@ def get_body(msg):
                     return ""
     return ""
 
-# ================= LOGIN FLOW =================
+# ================= LOGIN =================
 def login_user(chat_id, email_addr, app_pass):
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER)
@@ -51,32 +96,27 @@ def login_user(chat_id, email_addr, app_pass):
         uids = data[0].split()
         last_uid = uids[-1] if uids else None
 
-        users[chat_id] = {
-            "email": email_addr,
-            "pass": app_pass,
-            "last_uid": last_uid
-        }
+        save_user(chat_id, email_addr, app_pass, last_uid)
 
         mail.logout()
 
-        send(chat_id, "✅ *Logged in successfully!*")
+        send(chat_id, "✅ Logged in!")
+        send_menu(chat_id)
 
     except:
-        send(chat_id, "❌ Login failed. Try again with `/start`")
+        send(chat_id, "❌ Login failed")
 
 # ================= LOGOUT =================
 def logout_user(chat_id):
-    if chat_id in users:
-        del users[chat_id]
-        send(chat_id, "🚪 Logged out.")
-    else:
-        send(chat_id, "You are not logged in.")
+    delete_user(chat_id)
+    user_states.pop(chat_id, None)
+    send(chat_id, "🚪 Logged out")
 
 # ================= CHECK EMAIL =================
-def check_user_email(chat_id, user):
+def check_email(chat_id, email_addr, password, last_uid):
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER)
-        mail.login(user["email"], user["pass"])
+        mail.login(email_addr, password)
         mail.select("inbox")
 
         _, data = mail.uid("search", None, "ALL")
@@ -84,11 +124,11 @@ def check_user_email(chat_id, user):
 
         new_uids = [
             uid for uid in uids
-            if user["last_uid"] is None or int(uid) > int(user["last_uid"])
+            if last_uid is None or int(uid) > int(last_uid)
         ]
 
         if new_uids:
-            user["last_uid"] = new_uids[-1]
+            last_uid = new_uids[-1]
 
         for uid in new_uids:
             _, msg_data = mail.uid("fetch", uid, "(RFC822)")
@@ -107,10 +147,12 @@ def check_user_email(chat_id, user):
                     if otp:
                         send(chat_id, f"🔐 OTP: `{otp}`")
 
+        save_user(chat_id, email_addr, password, last_uid)
+
         mail.logout()
 
     except:
-        send(chat_id, "⚠️ Error checking email.")
+        send(chat_id, "⚠️ Email error")
 
 # ================= TELEGRAM =================
 LAST_UPDATE_ID = None
@@ -135,49 +177,56 @@ def handle_updates():
 
             # ===== START =====
             if text == "/start":
-                user_states[chat_id] = "awaiting_email"
-                send(chat_id, "📧 Enter your Gmail:")
+                cursor.execute("SELECT * FROM users WHERE chat_id=?", (chat_id,))
+                user = cursor.fetchone()
 
-            # ===== EMAIL STEP =====
+                if user:
+                    send(chat_id, "👋 Welcome back!")
+                    send_menu(chat_id)
+                else:
+                    user_states[chat_id] = "awaiting_email"
+                    send(chat_id, "📧 Enter your Gmail:")
+
+            # ===== EMAIL =====
             elif user_states.get(chat_id) == "awaiting_email":
                 user_states[chat_id] = {
                     "step": "awaiting_password",
                     "email": text
                 }
-                send(chat_id, "🔑 Enter your App Password:")
+                send(chat_id, "🔑 Enter App Password:")
 
-            # ===== PASSWORD STEP =====
+            # ===== PASSWORD =====
             elif isinstance(user_states.get(chat_id), dict):
                 data = user_states[chat_id]
-
                 if data["step"] == "awaiting_password":
-                    email_addr = data["email"]
-                    app_pass = text
-
+                    login_user(chat_id, data["email"], text)
                     user_states.pop(chat_id, None)
-                    login_user(chat_id, email_addr, app_pass)
 
-            # ===== LOGOUT =====
-            elif text == "/logout":
+        # ===== BUTTONS =====
+        if "callback_query" in update:
+            data = update["callback_query"]["data"]
+            chat_id = update["callback_query"]["message"]["chat"]["id"]
+
+            if data == "logout":
                 logout_user(chat_id)
 
 # ================= LOOPS =================
 def telegram_loop():
     while True:
-        try:
-            handle_updates()
-            time.sleep(1)
-        except:
-            time.sleep(2)
+        handle_updates()
+        time.sleep(1)
 
 def gmail_loop():
     while True:
-        for chat_id, user in list(users.items()):
-            check_user_email(chat_id, user)
+        users = get_all_users()
+
+        for chat_id, email_addr, password, last_uid in users:
+            check_email(chat_id, email_addr, password, last_uid)
+
         time.sleep(5)
 
 # ================= MAIN =================
-print("🚀 Step-login bot running...")
+print("🚀 DB BOT RUNNING...")
 
 threading.Thread(target=telegram_loop).start()
 threading.Thread(target=gmail_loop).start()
