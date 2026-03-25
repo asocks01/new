@@ -6,14 +6,14 @@ import random
 import time
 import re
 import threading
+import os
 from email.header import decode_header
 
-# ================= CONFIG =================
-EMAIL = "asocksavi01@gmail.com"
-APP_PASSWORD = "wnpw jsfv wley ditx"
+# ================= CONFIG (ENV) =================
+EMAIL = os.getenv("EMAIL")
+APP_PASSWORD = os.getenv("APP_PASSWORD")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-BOT_TOKEN = "7115609198:AAEAXFJDpYNznycabXUbI0oTfQNTaQAy8nw"
-CHAT_ID = "6796283644"
 IMAP_SERVER = "imap.gmail.com"
 
 # ================= TELEGRAM =================
@@ -267,7 +267,7 @@ def gmail_loop():
             time.sleep(5)
 
 # ================= MAIN =================
-print("🚀 FAST BOT RUNNING...")
+print("🚀 DEPLOYED BOT RUNNING...")
 
 init_last_uid()
 
